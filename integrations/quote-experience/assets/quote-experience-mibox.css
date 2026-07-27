@@ -1,0 +1,141 @@
+/* MI-BOX brand re-skin for the quote experience — scoped to .qx.qx-mibox
+   (used by /quote-thank-you-vt). Loads after quote-experience.css and only
+   overrides identity: color, type, button treatment. Layout untouched.
+
+   Brand tokens (as used across miboxgo.com):
+   - CTA yellow  amber-400 #fbbf24 (hover amber-300 #fcd34d, shadow #d97706)
+   - Navy        #1a2e3b (site footer / heading ink)
+   - Teal        #006d8f (header CTA / links, hover #005a76)
+   - Body grays  gray-600 #4b5563 / gray-500 #6b7280                        */
+
+.qx.qx-mibox {
+  --primary: #fbbf24;
+  --primary-deep: #d97706;
+  --on-primary: #1a2e3b;
+  --dark: #1a2e3b;
+  --dark-2: #223a4a;
+  --on-dark: #ffffff;
+  --on-dark-dim: #9fb3c0;
+  --ink: #1a2e3b;
+  --ink-soft: #4b5563;
+  --ink-faint: #6b7280;
+  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  /* The site uses no monospace anywhere — remap --mono to the sans stack so
+     all 23 mono-styled labels/prices/tags read as the same website. Price
+     rules keep their tabular-nums for column alignment. */
+  --mono: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  background: #ffffff;
+}
+
+/* Headings match the site's font-extrabold voice */
+.qx.qx-mibox h2 { font-weight: 800; color: #1a2e3b; }
+.qx.qx-mibox .step h3 { color: #1a2e3b; }
+
+/* Eyebrows pick up the MI-BOX teal */
+.qx.qx-mibox .eyebrow { color: #006d8f; }
+
+/* Buttons: site radius + MI-BOX pairings */
+.qx.qx-mibox .btn { border-radius: 4px; }
+.qx.qx-mibox .btn.primary { background: #fbbf24; color: #1a2e3b; box-shadow: 0 3px 0 #d97706; }
+.qx.qx-mibox .btn.primary:hover { background: #fcd34d; }
+.qx.qx-mibox .btn.dark { background: #1a2e3b; color: #fbbf24; box-shadow: 0 3px 0 #0f1d27; }
+.qx.qx-mibox .btn.outline-dark { border-color: #1a2e3b; color: #1a2e3b; }
+.qx.qx-mibox .btn.outline-dark:hover { background: #1a2e3b; color: #fbbf24; }
+.qx.qx-mibox .btn.ghost:hover { border-color: #006d8f; color: #006d8f; }
+
+/* Configurator + quote panel accents: navy instead of near-black,
+   amber-tinted sublabels -> teal/navy so they read on white           */
+.qx.qx-mibox .panel-h .tag { background: #1a2e3b; color: #fbbf24; }
+.qx.qx-mibox .opt input:checked + .box .s { color: #006d8f; }
+.qx.qx-mibox .qh .svc { color: #006d8f; }
+.qx.qx-mibox .transit b { color: #b45309; }
+.qx.qx-mibox .li .amt, .qx.qx-mibox .total, .qx.qx-mibox .total .big { color: #1a2e3b; }
+.qx.qx-mibox .cell .v { color: #1a2e3b; }
+.qx.qx-mibox .rev .av { background: #1a2e3b; color: #fbbf24; }
+.qx.qx-mibox .stars { color: #f59e0b; }
+
+/* WebGL stage: daylight scene (shader fork), so the frame goes light too */
+.qx.qx-mibox .viz { background: radial-gradient(120% 90% at 50% 15%, #f6f8fa, #dde5ec); }
+
+/* Dimension chips: flip for the light scene — white card, navy text, amber edge */
+.qx.qx-mibox .viz .dimtag {
+  background: rgba(255, 255, 255, 0.92);
+  border-color: #fbbf24;
+  color: #1a2e3b;
+  font-weight: 700;
+}
+
+/* Closing band: amber like the site's cta_banner, navy ink throughout */
+.qx.qx-mibox .end h2 { color: #1a2e3b; font-size: clamp(2rem, 5vw, 3rem); }
+.qx.qx-mibox .end p { color: #33475466; color: rgba(26, 46, 59, 0.78); }
+.qx.qx-mibox .end .eyebrow { color: rgba(26, 46, 59, 0.75); background: rgba(26, 46, 59, 0.08); }
+
+/* ------------------------------------------------------------------ */
+/* Typography unification — match the main site's proportions          */
+/* Site headings: text-3xl→5xl font-extrabold tracking-tight           */
+.qx.qx-mibox .sec-head h2 { font-size: clamp(1.875rem, 4vw, 3rem); letter-spacing: -0.025em; }
+
+/* Eyebrows become site-style badge chips ("HOW IT WORKS" treatment)   */
+.qx.qx-mibox .eyebrow {
+  font-weight: 700;
+  font-size: 0.72rem;
+  letter-spacing: 0.1em;
+  background: rgba(0, 109, 143, 0.08);
+  padding: 0.4em 1em;
+  border-radius: 4px;
+}
+
+/* Small-caps micro-labels: the .18–.32em mono tracking reads techy —
+   pull in to the site's tracking-widest (~0.1em) and bold them        */
+.qx.qx-mibox .panel-h .t,
+.qx.qx-mibox .field > label,
+.qx.qx-mibox .qh .lab,
+.qx.qx-mibox .transit-head,
+.qx.qx-mibox .cell .k,
+.qx.qx-mibox .step .idx,
+.qx.qx-mibox .total .tl { letter-spacing: 0.1em; font-weight: 700; }
+
+/* Numbers: the site's stats are extrabold sans — match it             */
+.qx.qx-mibox .total .big { font-weight: 800; letter-spacing: -0.02em; }
+.qx.qx-mibox .cell .v { font-weight: 800; }
+.qx.qx-mibox .li .amt { font-weight: 700; font-variant-numeric: tabular-nums; }
+
+/* Sans reads smaller than mono at equal size — give sublabels air     */
+.qx.qx-mibox .opt .box .s,
+.qx.qx-mibox .waiver .txt .s { font-size: 0.78rem; }
+
+/* Dual labeled phone CTAs — audience label above each number           */
+.qx.qx-mibox .btn .lbl {
+  display: block;
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  opacity: 0.85;
+  margin-bottom: 2px;
+}
+.qx.qx-mibox .qcta {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.qx.qx-mibox .qcta .btn {
+  flex-direction: column;
+  padding: 12px 14px;
+  line-height: 1.25;
+  white-space: nowrap;
+}
+.qx.qx-mibox .end .btn { flex-direction: column; line-height: 1.25; }
+.qx.qx-mibox .qcta .qq {
+  grid-column: 1 / -1;
+  text-align: center;
+  font-size: 0.85rem;
+  color: #006d8f;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+@media (max-width: 480px) {
+  .qx.qx-mibox .qcta { grid-template-columns: 1fr; }
+}

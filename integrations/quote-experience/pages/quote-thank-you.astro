@@ -1,0 +1,310 @@
+---
+// The MI-BOX quote experience — injected by the quote-experience integration
+// (default route /quote-thank-you). WebGL configurator + live Fuse pricing;
+// all per-site values (API host/token, phones, fallback prices) come from the
+// integration's options via virtual:quoting and virtual:quoting/config.
+export const prerender = false;
+
+import Layout from "@layouts/Layout.astro";
+import { getConfig, getQuote } from "virtual:quoting";
+import type { QuoteConfig } from "../runtime";
+import siteConfig from "virtual:quoting/config";
+import qxScriptUrl from "../assets/quote-experience-vt.js?url";
+import "../assets/quote-experience.css";
+import "../assets/quote-experience-mibox.css";
+
+const phones = siteConfig.phones.map((p) => ({
+  ...p,
+  display:
+    p.number.length === 10
+      ? `(${p.number.slice(0, 3)}) ${p.number.slice(3, 6)}-${p.number.slice(6)}`
+      : p.number,
+}));
+
+const q = Astro.url.searchParams;
+
+// Preferred path: a persisted Fuse quote referenced by uuid (?q=…), created
+// server-side by the quoteForm action. Falls back to plain URL params so old
+// links and a Fuse outage still render the page.
+const quoteId = q.get("q") ?? "";
+let storedQuote: any = null;
+if (quoteId) {
+  try {
+    storedQuote = await getQuote(quoteId);
+  } catch { /* fall through to URL params */ }
+}
+
+const params = {
+  service_type: storedQuote?.service_type ?? q.get("service_type") ?? "",
+  zip_code: storedQuote?.zip_code ?? q.get("zip_code") ?? "",
+  full_name: storedQuote?.full_name ?? q.get("full_name") ?? "",
+  product_type: storedQuote?.product_type ?? q.get("product_type") ?? "portable-storage",
+  container_size: q.get("container_size") ?? "",
+};
+
+// Map the submitted container_size (e.g. "8x16") onto the configurator's size
+// option (8 / 16 / 20 feet). When arriving via uuid, derive it from the stored
+// quote's product line instead. Defaults to the most-popular 16-foot.
+let sizeNum = Number(
+  /x\s*(\d+)/i.exec(params.container_size)?.[1] ??
+    /(\d+)/.exec(params.container_size)?.[1],
+);
+if (![8, 16, 20].includes(sizeNum)) {
+  for (const p of storedQuote?.products ?? []) {
+    const ft = Number(/(\d+)\s*(?:foot|ft)\b/i.exec(p.name ?? "")?.[1]);
+    if ([8, 16, 20].includes(ft)) { sizeNum = ft; break; }
+  }
+}
+const size = [8, 16, 20].includes(sizeNum) ? sizeNum : 16;
+
+// Real site data (reviews / FAQs / phone) — graceful if the API is unreachable.
+let config: QuoteConfig | null = null;
+try {
+  config = await getConfig({ service_type: params.service_type, zip_code: params.zip_code });
+} catch { /* fall back to the curated defaults below */ }
+
+const settings = config?.settings ?? {};
+
+// Real monthly rent per container size (API cents → dollars) from the Quoting
+// API catalog. Falls back to the integration's configured defaults if the API
+// is unreachable.
+const priceBySize: Record<number, number> = { ...siteConfig.fallbackPrices };
+for (const p of config?.products ?? []) {
+  const ft = Number(
+    /(\d+)\s*(?:foot|ft)\b/i.exec(p.name ?? "")?.[1] ??
+      /\b(8|16|20)\b/.exec(p.dimensions ?? "")?.[1],
+  );
+  const cents = p.discounted_price ?? p.price;
+  if ([8, 16, 20].includes(ft) && typeof cents === "number") {
+    priceBySize[ft] = Math.round(cents / 100);
+  }
+}
+
+// Map the submitted service_type onto the configurator's service option.
+const svcMap: Record<string, string> = {
+  "keep-it": "keep", "move-it": "move",
+  "store-it": "indoor", "store-it-indoor": "indoor", "store-it-outdoor": "outdoor",
+};
+const svc = svcMap[params.service_type] || "keep";
+
+// Reviews / FAQs: real API content when present, else curated fallbacks.
+const initials = (n: string) => n.split(/\s+/).map((w) => w[0]).join("").slice(0, 2).toUpperCase();
+const defaultReviews = [
+  { name: "Dana L.", title: "Williston, VT", content: "“Dropped level on the first try, exactly where I asked. We loaded the whole house over a week — no truck, no back injury.”", avatar_url: undefined as string | undefined },
+  { name: "Marcus R.", title: "Amherst, MA", content: "“Kept it in their indoor facility between closings. What I packed in March is exactly what came out in June. Zero drama.”", avatar_url: undefined },
+  { name: "Sofia P.", title: "Montpelier, VT", content: "“Priced it on their site, called, and the number matched. Refreshing to not get the runaround on a moving quote.”", avatar_url: undefined },
+];
+const reviews = (config?.reviews?.length ? config.reviews : defaultReviews);
+
+const defaultFaqs = [
+  { question: "How much space do I actually get?", answer: "A 16-foot unit holds roughly a 3-bedroom home — about 1,024 cubic feet with an 8-foot ceiling. The 8-foot suits a studio or a big garage clear-out; the 20-foot handles a 4–5 bedroom move." },
+  { question: "Do I need a permit or a special surface?", answer: "A flat driveway or level yard works. We set the container gently on the ground — no crane, no dug pad. If placement is tricky, tell us the ZIP and we'll advise before delivery." },
+  { question: "What does the ZIP code change?", answer: "It routes your quote to the nearest service location — which sets your local phone line and the transit legs. Storage-facility options (indoor/outdoor) depend on what's near you." },
+  { question: "Is the monthly rate all-in?", answer: "The monthly figure is your recurring rent — container plus any storage or waiver you add. Delivery and pickup are separate one-time transit charges, shown as “starting at” until we confirm the exact miles." },
+  { question: "Can I cancel or resize later?", answer: "Yes. Rent by the month and stop when you're done. Need a different size mid-project? We'll swap it — you only pay for the transit." },
+];
+const faqs = (config?.faqs?.length ? config.faqs : defaultFaqs);
+
+const firstName = params.full_name.trim().split(/\s+/)[0] || "";
+const title = firstName ? `${firstName}, here's your MI-BOX quote` : "Your MI-BOX Quote";
+
+// Client payload from the stored quote — only the computed pricing (line
+// items, fees, totals in cents), never contact details (email/phone stay
+// server-side). null when arriving without a uuid or when Fuse is down.
+const quoteView = storedQuote
+  ? {
+      uuid: storedQuote.uuid ?? quoteId,
+      service_type: params.service_type,
+      products: (storedQuote.products ?? []).map((p: any) => ({
+        name: p.name,
+        quantity: p.quantity,
+        subtotal: p.subtotal,
+        discounted_price: p.discounted_price ?? p.price,
+        monthly: p.monthly,
+      })),
+      fees: (storedQuote.fees ?? []).map((f: any) => ({
+        name: f.name,
+        amount: f.amount,
+        recurring: f.recurring,
+        starting_at: f.starting_at,
+      })),
+      subtotal: storedQuote.subtotal ?? null,
+      total: storedQuote.total ?? null,
+    }
+  : null;
+// <-escape so no API-sourced string can close the inline script tag.
+const quoteViewJson = JSON.stringify(quoteView).replace(/</g, "\\u003c");
+---
+
+<Layout title={title} description="Configure your MI-BOX portable storage — size it, price it, done." noIndex={true}>
+  <div class="qx qx-mibox">
+
+    <section class="band" id="configure" style="background:#fbfbfa">
+      <div class="wrap">
+        <div class="cfg">
+          <div class="sec-head reveal" style="align-self:center">
+            <span class="eyebrow">{firstName ? `Thanks, ${firstName} — build it out` : "Build your quote"}</span>
+            <h2>Size it. Price it. In real time.</h2>
+            <p>Every number below is live MI-BOX pricing. Change a choice and the monthly rate — and the container itself — updates instantly.</p>
+          </div>
+
+          <div class="viz reveal">
+            <canvas id="gl-box" aria-hidden="true"></canvas>
+            <div class="callouts">
+              <span class="dimtag d-l" id="tag-h">8'</span>
+              <span class="dimtag d-b" id="tag-l">16'</span>
+              <span class="dimtag d-c mono" id="tag-v">1,024 ft³</span>
+            </div>
+          </div>
+
+          <form class="panel reveal" id="cfg" aria-label="Quote configurator">
+            <div class="panel-h"><span class="t">Configuration</span><span class="tag" id="sku">MB-16 · KEEP</span></div>
+            <div class="field">
+              <label>Container size</label>
+              <div class="seg" role="radiogroup" aria-label="Container size">
+                <label class="opt"><input type="radio" name="size" value="8" checked={size === 8}><span class="box"><span class="k">8-foot</span><span class="s">8×8×8 · 512 ft³</span></span></label>
+                <label class="opt"><input type="radio" name="size" value="16" checked={size === 16}><span class="box"><span class="k">16-foot</span><span class="s">16×8×8 · 1,024 ft³ · most popular</span></span></label>
+                <label class="opt"><input type="radio" name="size" value="20" checked={size === 20}><span class="box"><span class="k">20-foot</span><span class="s">20×8×8 · 1,280 ft³</span></span></label>
+              </div>
+            </div>
+            <div class="field">
+              <label>Service</label>
+              <div class="seg four" role="radiogroup" aria-label="Service">
+                <label class="opt"><input type="radio" name="svc" value="keep" checked={svc === "keep"}><span class="box"><span class="k">Keep It</span><span class="s">on your property</span></span></label>
+                <label class="opt"><input type="radio" name="svc" value="move" checked={svc === "move"}><span class="box"><span class="k">Move It</span><span class="s">to a new address</span></span></label>
+                <label class="opt"><input type="radio" name="svc" value="indoor" checked={svc === "indoor"}><span class="box"><span class="k">Store · Indoor</span><span class="s">climate facility</span></span></label>
+                <label class="opt"><input type="radio" name="svc" value="outdoor" checked={svc === "outdoor"}><span class="box"><span class="k">Store · Outdoor</span><span class="s">secure lot</span></span></label>
+              </div>
+            </div>
+            <div class="field">
+              <div class="waiver">
+                <div class="txt"><div class="k">Container Damage Waiver</div><div class="s">Covers accidental damage to the unit · $15/mo</div></div>
+                <button type="button" class="toggle" id="waiver" aria-pressed="true" aria-label="Toggle damage waiver"></button>
+              </div>
+            </div>
+          </form>
+
+          <div class="panel reveal">
+            <div class="qh"><span class="lab">Monthly recurring</span><span class="svc" id="svc-label">Keep It · on-site</span></div>
+            <div class="lines" id="lines"></div>
+            <div class="transit-sec">
+              <div class="transit-head">Transit · one-time <span>billed separately</span></div>
+              <div id="transit-lines"></div>
+            </div>
+            <div class="total">
+              <div><div class="tl">Your rate</div><div><span class="big"><span id="total">254</span></span><span class="per">/mo</span></div></div>
+              <div class="mono dim" style="text-align:right;font-size:.72rem" id="capacity">holds ≈ a 3-bed home</div>
+            </div>
+            <div class="qcta">
+              {phones.map((p, i) => (
+                <a class={`btn ${i === 0 ? "primary" : "dark"}`} href={`tel:${p.number}`}><span class="lbl">{p.label}</span>{p.display}</a>
+              ))}
+              <a class="qq" href="#faq">Questions? Read the FAQ</a>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="band" id="reviews" style="background:#fbfbfa">
+      <div class="wrap">
+        <div class="sec-head reveal">
+          <span class="eyebrow">From the driveway</span>
+          <h2>Neighbors who stopped renting trucks.</h2>
+        </div>
+        <div class="revs">
+          {reviews.map((r) => (
+            <div class="rev reveal">
+              <div class="stars">★★★★★</div>
+              {r.content ? <p set:html={r.content} /> : <p></p>}
+              <div class="by">
+                {r.avatar_url ? <img class="av" src={r.avatar_url} alt={r.name} style="object-fit:cover" /> : <span class="av">{initials(r.name)}</span>}
+                <span class="who"><b>{r.name}</b><span>{r.title}</span></span>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </section>
+
+    <section class="band" id="how">
+      <div class="wrap">
+        <div class="sec-head reveal">
+          <span class="eyebrow">How it works</span>
+          <h2>Three moves. That's the whole thing.</h2>
+          <p>No truck to rent, no dolly, no weekend lost to a U-Haul. The container comes to you and waits on your schedule.</p>
+        </div>
+        <div class="steps">
+          <div class="step reveal">
+            <span class="idx">01 / Deliver</span>
+            <svg class="diagram" viewBox="0 0 120 64" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 44h44V22H8zM52 30h20l10 8v6H52z" stroke-linejoin="round"/><circle cx="26" cy="50" r="4"/><circle cx="70" cy="50" r="4"/><path d="M96 44h16M104 36v16" class="a"/></svg>
+            <h3>We set it level, right where you want it.</h3>
+            <p>Our Roll-Off delivery lowers the box gently to the ground — flat floor, no tilt, no ramp to climb.</p>
+          </div>
+          <div class="step reveal">
+            <span class="idx">02 / Pack</span>
+            <svg class="diagram" viewBox="0 0 120 64" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="18" y="16" width="34" height="32" rx="2"/><rect x="60" y="26" width="20" height="22" rx="2"/><rect x="86" y="10" width="16" height="38" rx="2"/><path d="M12 52h100" class="a"/></svg>
+            <h3>Load it over days, not one frantic afternoon.</h3>
+            <p>It stays on your property as long as you need. Pack a room a night; lock it when you're done.</p>
+          </div>
+          <div class="step reveal">
+            <span class="idx">03 / Keep · Move · Store</span>
+            <svg class="diagram" viewBox="0 0 120 64" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 40h28V22H14z"/><path d="M52 31h10l6 5v4H52z"/><path d="M74 40l14-14M80 26h8v8" class="a"/><path d="M96 40h16V26H96z"/></svg>
+            <h3>Leave it, relocate it, or we warehouse it.</h3>
+            <p>Same box, three endings. Nothing gets re-handled — what you packed is what arrives.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="band" id="spec">
+      <div class="wrap">
+        <div class="sec-head reveal">
+          <span class="eyebrow">The container</span>
+          <h2>Engineered to protect what you pack.</h2>
+          <p>Weatherproof steel and smart design — your belongings stay clean, dry, and secure.</p>
+        </div>
+        <div class="spec">
+          <div class="cell reveal"><span class="v">14-ga</span><span class="k">Steel skin</span><p>Smooth galvanized steel panels — dent-resistant and rust-treated.</p></div>
+          <div class="cell reveal"><span class="v">Ground</span><span class="k">Level loading</span><p>Roll-Off delivery means a flat floor. No ramp, no lift, no strain.</p></div>
+          <div class="cell reveal"><span class="v">Sealed</span><span class="k">Weather-tight</span><p>Gasketed roll-up door and vents keep rain, dust, and moisture out.</p></div>
+          <div class="cell reveal"><span class="v">1 key</span><span class="k">Yours only</span><p>You hold the only key from delivery to the day it's emptied.</p></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="band" id="faq">
+      <div class="wrap">
+        <div class="sec-head reveal">
+          <span class="eyebrow">Before you book</span>
+          <h2>The questions everyone asks.</h2>
+        </div>
+        <div class="faq reveal">
+          {faqs.map((f, i) => (
+            <details open={i === 0}>
+              <summary>{f.question}</summary>
+              <div class="ans" set:html={f.answer} />
+            </details>
+          ))}
+        </div>
+      </div>
+    </section>
+
+    <section class="end">
+      <div class="wrap">
+        <span class="eyebrow reveal">Ready when you are</span>
+        <h2 class="reveal">Get the box on the calendar.</h2>
+        <p class="reveal">Tell us your ZIP and a size — a MI-BOX specialist calls back within 15 minutes with a firm, all-in number.</p>
+        <div class="phones reveal">
+          {phones.map((p, i) => (
+            <a class={`btn ${i === 0 ? "dark" : "outline-dark"}`} href={`tel:${p.number}`} style="min-width:220px"><span class="lbl">{p.label}</span>{p.display}</a>
+          ))}
+        </div>
+      </div>
+    </section>
+
+  </div>
+
+  <script is:inline set:html={`window.__QX_PRICES=${JSON.stringify(priceBySize)};window.__QX_QUOTE=${quoteViewJson}`}></script>
+  <script is:inline defer src={qxScriptUrl}></script>
+</Layout>
