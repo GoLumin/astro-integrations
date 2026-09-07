@@ -18,6 +18,35 @@ silent: a service with no catalog is disabled and a missing price renders as
 "Call for pricing", because a plausible-looking wrong number on a quote is
 worse than an absent one.
 
+## Installation
+
+Copy the `quote-experience` folder into your project's `src/integrations`
+directory.
+
+**Source**
+
+```text
+integrations/quote-experience
+```
+
+**Destination**
+
+```text
+./src/integrations/quote-experience
+```
+
+Your project structure should look like:
+
+```text
+src/
+├── integrations/
+│   └── quote-experience/
+```
+
+If your `tsconfig.json` does not already pick up `src/**/*`, make sure
+`virtual.d.ts` is included — it is what makes `virtual:quoting` and
+`virtual:quoting/config` typed.
+
 ## Folder layout
 
 ```
@@ -88,15 +117,15 @@ looks best).
 
 ### Options
 
-| Option         | Required | Default                              | Description                                                                 |
-| -------------- | -------- | ------------------------------------ | --------------------------------------------------------------------------- |
-| `route`        | no       | `"/quote-thank-you"`                 | Path the quote page is injected at.                                          |
-| `baseUrl`      | no       | `PUBLIC_API_URL_V2` env var          | gofuse host for the Quoting API.                                             |
-| `tokenEnv`     | no       | `"QUOTING_API_TOKEN"`                | Name of the env var holding the API token.                                   |
-| `brandName`    | no       | `"MI-BOX"`                           | Used in the page title and body copy.                                        |
-| `logo`         | no       | `"/logo.png"`                        | Logo the WebGL shader decals onto the container.                             |
-| `phones`       | no       | VT + MA numbers                      | Fallback CTA numbers, first wins — only used when gofuse returns no phone.    |
-| `serviceNotes` | no       | keep-it / move-it / store-it notes   | One-liner under each service name, keyed by gofuse slug.                      |
+| Option         | Required | Default                            | Description                                                                |
+| -------------- | -------- | ---------------------------------- | -------------------------------------------------------------------------- |
+| `route`        | no       | `"/quote-thank-you"`               | Path the quote page is injected at.                                        |
+| `baseUrl`      | no       | `PUBLIC_API_URL_V2` env var        | gofuse host for the Quoting API.                                           |
+| `tokenEnv`     | no       | `"QUOTING_API_TOKEN"`              | Name of the env var holding the API token.                                 |
+| `brandName`    | no       | `"MI-BOX"`                         | Used in the page title and body copy.                                      |
+| `logo`         | no       | `"/logo.png"`                      | Logo the WebGL shader decals onto the container.                           |
+| `phones`       | no       | VT + MA numbers                    | Fallback CTA numbers, first wins — only used when gofuse returns no phone. |
+| `serviceNotes` | no       | keep-it / move-it / store-it notes | One-liner under each service name, keyed by gofuse slug.                   |
 
 ## How the flow works
 
@@ -156,7 +185,12 @@ component (the token is baked into the module at build time and would ship to
 the browser).
 
 ```ts
-import { createQuote, getQuote, getConfig, previewQuote } from "virtual:quoting";
+import {
+  createQuote,
+  getQuote,
+  getConfig,
+  previewQuote,
+} from "virtual:quoting";
 
 const quote = await createQuote({
   service_type: "keep-it",
