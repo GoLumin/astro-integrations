@@ -26,7 +26,9 @@ declare module "virtual:quoting/config" {
   /** Per-site display options passed to the integration in astro.config.mjs. */
   const config: {
     phones: { label: string; number: string }[];
-    fallbackPrices: Record<number, number>;
+    logo: string;
+    brandName: string;
+    serviceNotes: Record<string, string>;
   };
   export default config;
 }

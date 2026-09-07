@@ -1,142 +1,215 @@
 ---
 // The MI-BOX quote experience — injected by the quote-experience integration
-// (default route /quote-thank-you). WebGL configurator + live Fuse pricing;
-// all per-site values (API host/token, phones, fallback prices) come from the
-// integration's options via virtual:quoting and virtual:quoting/config.
+// (default route /quote-thank-you). WebGL configurator + live gofuse pricing;
+// all per-site values (API host/token, brand name, phones, logo, service
+// notes) come from the integration's options via virtual:quoting and
+// virtual:quoting/config.
 export const prerender = false;
 
 import Layout from "@layouts/Layout.astro";
-import { getConfig, getQuote } from "virtual:quoting";
-import type { QuoteConfig } from "../runtime";
+import { getConfig, getQuote, previewQuote } from "virtual:quoting";
+import type { QuoteConfig, QuotePreview } from "../runtime";
+import {
+  brandFrom,
+  labelsFrom,
+  lengthsAcross,
+  monthlyFor,
+  parseDimensions,
+  productAtLength,
+  totalFor,
+  toServiceView,
+  type ServiceView,
+} from "../pricing";
+import { sanitize, sanitizeToText } from "../sanitize";
 import siteConfig from "virtual:quoting/config";
 import qxScriptUrl from "../assets/quote-experience-vt.js?url";
 import "../assets/quote-experience.css";
 import "../assets/quote-experience-mibox.css";
 
-const phones = siteConfig.phones.map((p) => ({
-  ...p,
-  display:
-    p.number.length === 10
-      ? `(${p.number.slice(0, 3)}) ${p.number.slice(3, 6)}-${p.number.slice(6)}`
-      : p.number,
-}));
+// Every price, fee, label and service on this page comes from gofuse. Nothing
+// here substitutes a default when the API is silent: a service with no catalog
+// is disabled and a missing price renders as "Call for pricing", because a
+// plausible-looking wrong number on a quote is worse than an absent one.
 
 const q = Astro.url.searchParams;
-
-// Preferred path: a persisted Fuse quote referenced by uuid (?q=…), created
-// server-side by the quoteForm action. Falls back to plain URL params so old
-// links and a Fuse outage still render the page.
 const quoteId = q.get("q") ?? "";
+
 let storedQuote: any = null;
 if (quoteId) {
   try {
     storedQuote = await getQuote(quoteId);
-  } catch { /* fall through to URL params */ }
+  } catch (error) {
+    console.error("quote-thank-you: getQuote failed —", (error as Error)?.message);
+  }
 }
 
+// A stored quote reports service_type/product_type as { slug, name }; the
+// redirect URL carries the same values as bare slugs.
+const slugOf = (v: unknown): string | undefined =>
+  typeof v === "string" ? v : (v as { slug?: string } | undefined)?.slug;
+
 const params = {
-  service_type: storedQuote?.service_type ?? q.get("service_type") ?? "",
-  zip_code: storedQuote?.zip_code ?? q.get("zip_code") ?? "",
+  service_type: slugOf(storedQuote?.service_type) ?? q.get("service_type") ?? "",
+  zip_code: storedQuote?.initial_zip ?? q.get("zip_code") ?? "",
+  destination_zip_code: storedQuote?.final_zip ?? q.get("destination_zip_code") ?? "",
   full_name: storedQuote?.full_name ?? q.get("full_name") ?? "",
-  product_type: storedQuote?.product_type ?? q.get("product_type") ?? "portable-storage",
+  product_type: slugOf(storedQuote?.product_type) ?? q.get("product_type") ?? "portable-storage",
   container_size: q.get("container_size") ?? "",
 };
 
-// Map the submitted container_size (e.g. "8x16") onto the configurator's size
-// option (8 / 16 / 20 feet). When arriving via uuid, derive it from the stored
-// quote's product line instead. Defaults to the most-popular 16-foot.
-let sizeNum = Number(
-  /x\s*(\d+)/i.exec(params.container_size)?.[1] ??
-    /(\d+)/.exec(params.container_size)?.[1],
-);
-if (![8, 16, 20].includes(sizeNum)) {
-  for (const p of storedQuote?.products ?? []) {
-    const ft = Number(/(\d+)\s*(?:foot|ft)\b/i.exec(p.name ?? "")?.[1]);
-    if ([8, 16, 20].includes(ft)) { sizeNum = ft; break; }
-  }
-}
-const size = [8, 16, 20].includes(sizeNum) ? sizeNum : 16;
-
-// Real site data (reviews / FAQs / phone) — graceful if the API is unreachable.
-let config: QuoteConfig | null = null;
+// One unfiltered config call returns the site's service types plus every active
+// product tagged with the services it belongs to, which is exactly what the
+// per-service calls return filtered. Fees still need a preview per service.
+let baseConfig: QuoteConfig | null = null;
 try {
-  config = await getConfig({ service_type: params.service_type, zip_code: params.zip_code });
-} catch { /* fall back to the curated defaults below */ }
+  baseConfig = await getConfig({ zip_code: params.zip_code });
+} catch (error) {
+  console.error("quote-thank-you: getConfig failed —", (error as Error)?.message);
+}
 
-const settings = config?.settings ?? {};
+const apiServices = baseConfig?.service_types ?? [];
+const previews = await Promise.all(
+  apiServices.map(async ({ slug }) => {
+    try {
+      // product_type is required: omitting it makes gofuse return an empty
+      // products/fees set with a 200 rather than defaulting to a product.
+      return await previewQuote({
+        service_type: slug,
+        product_type: params.product_type,
+        zip_code: params.zip_code,
+        // gofuse needs the destination to price Move It's relocation leg. Sent
+        // to every service and ignored where it does not apply.
+        destination_zip_code: params.destination_zip_code || undefined,
+      });
+    } catch (error) {
+      console.error(`quote-thank-you: previewQuote(${slug}) failed —`, (error as Error)?.message);
+      return null as QuotePreview | null;
+    }
+  }),
+);
 
-// Real monthly rent per container size (API cents → dollars) from the Quoting
-// API catalog. Falls back to the integration's configured defaults if the API
-// is unreachable.
-const priceBySize: Record<number, number> = { ...siteConfig.fallbackPrices };
-for (const p of config?.products ?? []) {
-  const ft = Number(
-    /(\d+)\s*(?:foot|ft)\b/i.exec(p.name ?? "")?.[1] ??
-      /\b(8|16|20)\b/.exec(p.dimensions ?? "")?.[1],
-  );
-  const cents = p.discounted_price ?? p.price;
-  if ([8, 16, 20].includes(ft) && typeof cents === "number") {
-    priceBySize[ft] = Math.round(cents / 100);
+const services: ServiceView[] = apiServices.map((st, i) =>
+  toServiceView(
+    st.slug,
+    st.name,
+    // Scope the shared catalog to this service the same way the API does.
+    baseConfig
+      ? { ...baseConfig, products: baseConfig.products.filter((p) => p.service_types?.includes(st.slug)) }
+      : null,
+    previews[i],
+  ),
+);
+
+for (const s of services) {
+  if (!s.totalsAgree) {
+    console.error(
+      `quote-thank-you: our total for ${s.slug} no longer matches gofuse's own ` +
+        `(gofuse says ${s.apiTotal}). Pricing rules have changed — check extractFees().`,
+    );
   }
 }
 
-// Map the submitted service_type onto the configurator's service option.
-const svcMap: Record<string, string> = {
-  "keep-it": "keep", "move-it": "move",
-  "store-it": "indoor", "store-it-indoor": "indoor", "store-it-outdoor": "outdoor",
+const labels = labelsFrom(baseConfig?.settings);
+const brand = brandFrom(baseConfig?.settings);
+const lengths = lengthsAcross(services);
+
+// Which service to open on. The customer's own choice wins, then whatever
+// gofuse can actually price.
+const selectedService =
+  services.find((s) => s.slug === params.service_type && s.available) ??
+  services.find((s) => s.slug === params.service_type) ??
+  services.find((s) => s.available) ??
+  services[0] ??
+  null;
+
+// Container length, in order of trust: the line items on the stored quote, the
+// size the customer picked on the form, then whatever this service offers.
+function lengthFromStoredQuote(): number | null {
+  for (const item of storedQuote?.line_items ?? []) {
+    // Line items carry a name ("16’ x 8’") but no dimensions, so match the name
+    // against the catalog rather than parsing it.
+    const match = services
+      .flatMap((s) => s.products)
+      .find((p) => p.name === item.name && p.lengthFt != null);
+    if (match?.lengthFt != null) return match.lengthFt;
+    const parsed = parseDimensions(item.name);
+    if (parsed.lengthFt != null && lengths.includes(parsed.lengthFt)) return parsed.lengthFt;
+  }
+  return null;
+}
+function lengthFromParam(): number | null {
+  const n = Number(/(\d+)/.exec(params.container_size)?.[1]);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+const availableLengths = selectedService?.products.map((p) => p.lengthFt).filter((n): n is number => n != null) ?? [];
+const requestedLength = lengthFromStoredQuote() ?? lengthFromParam();
+// A requested size gofuse does not stock for this service (the form still
+// offers 8', which has no product) falls to the nearest size it does stock.
+const selectedLength =
+  requestedLength != null && availableLengths.includes(requestedLength)
+    ? requestedLength
+    : requestedLength != null && availableLengths.length
+      ? (availableLengths.filter((n) => n <= requestedLength).pop() ?? Math.min(...availableLengths))
+      : (availableLengths[0] ?? lengths[0] ?? null);
+
+const selectedProduct =
+  selectedService && selectedLength != null ? productAtLength(selectedService, selectedLength) : null;
+
+// Presentational one-liners under each service name, configured per site.
+// Absent for any service slug this site has not written copy for — never
+// invented from the slug.
+const SERVICE_NOTES: Record<string, string> = siteConfig.serviceNotes ?? {};
+
+const outOfAreaText = services.map((s) => s.outOfAreaText).find(Boolean) ?? null;
+
+const money = (cents: number) =>
+  (cents / 100).toLocaleString("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: cents % 100 === 0 ? 0 : 2,
+    maximumFractionDigits: 2,
+  });
+
+const sizeLabel = (lengthFt: number) => {
+  const p = selectedService ? productAtLength(selectedService, lengthFt) : null;
+  const cuft = p?.cuft ?? null;
+  return {
+    name: p?.name ?? `${lengthFt}'`,
+    detail: [p?.dimensions, cuft ? `${cuft.toLocaleString()} ft³` : null].filter(Boolean).join(" · "),
+  };
 };
-const svc = svcMap[params.service_type] || "keep";
 
-// Reviews / FAQs: real API content when present, else curated fallbacks.
+const reviews = (baseConfig?.reviews ?? []).filter((r) => r.name);
+const faqs = (baseConfig?.faqs ?? []).filter((f) => f.question);
 const initials = (n: string) => n.split(/\s+/).map((w) => w[0]).join("").slice(0, 2).toUpperCase();
-const defaultReviews = [
-  { name: "Dana L.", title: "Williston, VT", content: "“Dropped level on the first try, exactly where I asked. We loaded the whole house over a week — no truck, no back injury.”", avatar_url: undefined as string | undefined },
-  { name: "Marcus R.", title: "Amherst, MA", content: "“Kept it in their indoor facility between closings. What I packed in March is exactly what came out in June. Zero drama.”", avatar_url: undefined },
-  { name: "Sofia P.", title: "Montpelier, VT", content: "“Priced it on their site, called, and the number matched. Refreshing to not get the runaround on a moving quote.”", avatar_url: undefined },
-];
-const reviews = (config?.reviews?.length ? config.reviews : defaultReviews);
-
-const defaultFaqs = [
-  { question: "How much space do I actually get?", answer: "A 16-foot unit holds roughly a 3-bedroom home — about 1,024 cubic feet with an 8-foot ceiling. The 8-foot suits a studio or a big garage clear-out; the 20-foot handles a 4–5 bedroom move." },
-  { question: "Do I need a permit or a special surface?", answer: "A flat driveway or level yard works. We set the container gently on the ground — no crane, no dug pad. If placement is tricky, tell us the ZIP and we'll advise before delivery." },
-  { question: "What does the ZIP code change?", answer: "It routes your quote to the nearest service location — which sets your local phone line and the transit legs. Storage-facility options (indoor/outdoor) depend on what's near you." },
-  { question: "Is the monthly rate all-in?", answer: "The monthly figure is your recurring rent — container plus any storage or waiver you add. Delivery and pickup are separate one-time transit charges, shown as “starting at” until we confirm the exact miles." },
-  { question: "Can I cancel or resize later?", answer: "Yes. Rent by the month and stop when you're done. Need a different size mid-project? We'll swap it — you only pay for the transit." },
-];
-const faqs = (config?.faqs?.length ? config.faqs : defaultFaqs);
 
 const firstName = params.full_name.trim().split(/\s+/)[0] || "";
-const title = firstName ? `${firstName}, here's your MI-BOX quote` : "Your MI-BOX Quote";
+const brandName = siteConfig.brandName || "MI-BOX";
+const title = firstName ? `${firstName}, here's your ${brandName} quote` : `Your ${brandName} Quote`;
 
-// Client payload from the stored quote — only the computed pricing (line
-// items, fees, totals in cents), never contact details (email/phone stay
-// server-side). null when arriving without a uuid or when Fuse is down.
-const quoteView = storedQuote
-  ? {
-      uuid: storedQuote.uuid ?? quoteId,
-      service_type: params.service_type,
-      products: (storedQuote.products ?? []).map((p: any) => ({
-        name: p.name,
-        quantity: p.quantity,
-        subtotal: p.subtotal,
-        discounted_price: p.discounted_price ?? p.price,
-        monthly: p.monthly,
-      })),
-      fees: (storedQuote.fees ?? []).map((f: any) => ({
-        name: f.name,
-        amount: f.amount,
-        recurring: f.recurring,
-        starting_at: f.starting_at,
-      })),
-      subtotal: storedQuote.subtotal ?? null,
-      total: storedQuote.total ?? null,
-    }
-  : null;
-// <-escape so no API-sourced string can close the inline script tag.
-const quoteViewJson = JSON.stringify(quoteView).replace(/</g, "\\u003c");
+// The client re-renders from this on every size/service change. It carries the
+// API's numbers in cents, exactly as gofuse returned them.
+const payload = {
+  services: services.map((s) => ({ ...s, note: SERVICE_NOTES[s.slug] ?? null })),
+  lengths,
+  labels,
+  brand,
+  initial: { service: selectedService?.slug ?? null, lengthFt: selectedLength },
+  logo: siteConfig.logo,
+};
+const payloadJson = JSON.stringify(payload).replace(/</g, "\\u003c");
+
+// gofuse resolves the phone from the ZIP's service location, so it is the
+// accurate number. The configured one is a last resort: when the API is down
+// the page still has to offer a way to call.
+const fallbackPhone = siteConfig.phones[0]?.number ?? null;
+const phone = labels.phone ?? fallbackPhone;
+const phoneDigits = (phone ?? "").replace(/\D/g, "");
+const bookNowLink = labels.bookNowLink ?? (phoneDigits ? `tel:${phoneDigits}` : null);
+const bookNowText = labels.bookNowText ?? (phone ? `Call ${phone}` : null);
 ---
 
-<Layout title={title} description="Configure your MI-BOX portable storage — size it, price it, done." noIndex={true}>
+<Layout title={title} description={`Configure your ${brandName} portable storage — size it, price it, done.`} noIndex={true}>
   <div class="qx qx-mibox">
 
     <section class="band" id="configure" style="background:#fbfbfa">
@@ -145,87 +218,120 @@ const quoteViewJson = JSON.stringify(quoteView).replace(/</g, "\\u003c");
           <div class="sec-head reveal" style="align-self:center">
             <span class="eyebrow">{firstName ? `Thanks, ${firstName} — build it out` : "Build your quote"}</span>
             <h2>Size it. Price it. In real time.</h2>
-            <p>Every number below is live MI-BOX pricing. Change a choice and the monthly rate — and the container itself — updates instantly.</p>
+            <p>Every number below is live {brandName} pricing. Change a choice and the monthly rate — and the container itself — updates instantly.</p>
           </div>
 
           <div class="viz reveal">
             <canvas id="gl-box" aria-hidden="true"></canvas>
             <div class="callouts">
               <span class="dimtag d-l" id="tag-h">8'</span>
-              <span class="dimtag d-b" id="tag-l">16'</span>
-              <span class="dimtag d-c mono" id="tag-v">1,024 ft³</span>
+              <span class="dimtag d-b" id="tag-l">{selectedLength ? `${selectedLength}'` : ""}</span>
+              <span class="dimtag d-c mono" id="tag-v">{selectedProduct?.cuft ? `${selectedProduct.cuft.toLocaleString()} ft³` : ""}</span>
             </div>
           </div>
 
           <form class="panel reveal" id="cfg" aria-label="Quote configurator">
-            <div class="panel-h"><span class="t">Configuration</span><span class="tag" id="sku">MB-16 · KEEP</span></div>
-            <div class="field">
-              <label>Container size</label>
-              <div class="seg" role="radiogroup" aria-label="Container size">
-                <label class="opt"><input type="radio" name="size" value="8" checked={size === 8}><span class="box"><span class="k">8-foot</span><span class="s">8×8×8 · 512 ft³</span></span></label>
-                <label class="opt"><input type="radio" name="size" value="16" checked={size === 16}><span class="box"><span class="k">16-foot</span><span class="s">16×8×8 · 1,024 ft³ · most popular</span></span></label>
-                <label class="opt"><input type="radio" name="size" value="20" checked={size === 20}><span class="box"><span class="k">20-foot</span><span class="s">20×8×8 · 1,280 ft³</span></span></label>
-              </div>
+            <div class="panel-h">
+              <span class="t">Configuration</span>
+              <span class="tag" id="sku">{[selectedProduct?.name, selectedService?.name].filter(Boolean).join(" · ")}</span>
             </div>
-            <div class="field">
-              <label>Service</label>
-              <div class="seg four" role="radiogroup" aria-label="Service">
-                <label class="opt"><input type="radio" name="svc" value="keep" checked={svc === "keep"}><span class="box"><span class="k">Keep It</span><span class="s">on your property</span></span></label>
-                <label class="opt"><input type="radio" name="svc" value="move" checked={svc === "move"}><span class="box"><span class="k">Move It</span><span class="s">to a new address</span></span></label>
-                <label class="opt"><input type="radio" name="svc" value="indoor" checked={svc === "indoor"}><span class="box"><span class="k">Store · Indoor</span><span class="s">climate facility</span></span></label>
-                <label class="opt"><input type="radio" name="svc" value="outdoor" checked={svc === "outdoor"}><span class="box"><span class="k">Store · Outdoor</span><span class="s">secure lot</span></span></label>
+
+            {lengths.length > 0 && (
+              <div class="field">
+                <label>Container size</label>
+                <div class="seg" role="radiogroup" aria-label="Container size">
+                  {lengths.map((ft) => {
+                    const l = sizeLabel(ft);
+                    const offered = availableLengths.includes(ft);
+                    return (
+                      <label class={`opt${offered ? "" : " unavailable"}`}>
+                        <input type="radio" name="size" value={ft} checked={ft === selectedLength} disabled={!offered} />
+                        <span class="box"><span class="k">{l.name}</span><span class="s">{l.detail}</span></span>
+                      </label>
+                    );
+                  })}
+                </div>
               </div>
-            </div>
-            <div class="field">
-              <div class="waiver">
-                <div class="txt"><div class="k">Container Damage Waiver</div><div class="s">Covers accidental damage to the unit · $15/mo</div></div>
-                <button type="button" class="toggle" id="waiver" aria-pressed="true" aria-label="Toggle damage waiver"></button>
+            )}
+
+            {services.length > 0 && (
+              <div class="field">
+                <label>Service</label>
+                <div class={`seg${services.length >= 4 ? " four" : ""}`} role="radiogroup" aria-label="Service">
+                  {services.map((s) => (
+                    <label class={`opt${s.available ? "" : " unavailable"}`}>
+                      <input type="radio" name="svc" value={s.slug} checked={s.slug === selectedService?.slug} disabled={!s.available} />
+                      <span class="box"><span class="k">{s.name}</span><span class="s">{payload.services.find((p) => p.slug === s.slug)?.note ?? ""}</span></span>
+                    </label>
+                  ))}
+                </div>
               </div>
-            </div>
+            )}
           </form>
 
           <div class="panel reveal">
-            <div class="qh"><span class="lab">Monthly recurring</span><span class="svc" id="svc-label">Keep It · on-site</span></div>
+            <div class="qh">
+              <span class="lab" id="products-label">{labels.products}</span>
+              <span class="svc" id="svc-label">{selectedService?.name ?? ""}</span>
+            </div>
             <div class="lines" id="lines"></div>
-            <div class="transit-sec">
-              <div class="transit-head">Transit · one-time <span>billed separately</span></div>
+            <div class="transit-sec" id="transit-sec">
+              <div class="transit-head"><span id="fees-label">{labels.fees}</span> <span>billed separately</span></div>
               <div id="transit-lines"></div>
+              <div class="fees-total-row" id="fees-total-row" style="display:none"><span>Total Fees</span><span id="fees-total"></span></div>
             </div>
             <div class="total">
-              <div><div class="tl">Your rate</div><div><span class="big"><span id="total">254</span></span><span class="per">/mo</span></div></div>
-              <div class="mono dim" style="text-align:right;font-size:.72rem" id="capacity">holds ≈ a 3-bed home</div>
+              <div>
+                <div class="tl" id="due-label">{labels.total}</div>
+                <div><span class="big" id="due-total">{
+                  selectedProduct && selectedService ? money(totalFor(selectedService, selectedProduct)) : "—"
+                }</span></div>
+                <div class="then-mo" id="then-mo">{
+                  selectedProduct && selectedService
+                    ? `then ${money(monthlyFor(selectedService, selectedProduct))}/mo`
+                    : ""
+                }</div>
+              </div>
+              <div class="mono dim" style="text-align:right;font-size:.72rem" id="capacity">{selectedProduct?.idealFor[0] ?? ""}</div>
             </div>
             <div class="qcta">
-              {phones.map((p, i) => (
-                <a class={`btn ${i === 0 ? "primary" : "dark"}`} href={`tel:${p.number}`}><span class="lbl">{p.label}</span>{p.display}</a>
-              ))}
+              {bookNowLink && bookNowText && (
+                <a class="btn primary" href={bookNowLink}>{bookNowText}</a>
+              )}
               <a class="qq" href="#faq">Questions? Read the FAQ</a>
             </div>
+            {labels.qualifying && <p class="dim panel-note" id="qualifying">{labels.qualifying}</p>}
+            {labels.whatHappensNext && (
+              <div class="dim panel-note" set:html={sanitize(labels.whatHappensNext)} />
+            )}
+            {outOfAreaText && <p class="dim panel-note">{outOfAreaText}</p>}
           </div>
         </div>
       </div>
     </section>
 
-    <section class="band" id="reviews" style="background:#fbfbfa">
-      <div class="wrap">
-        <div class="sec-head reveal">
-          <span class="eyebrow">From the driveway</span>
-          <h2>Neighbors who stopped renting trucks.</h2>
-        </div>
-        <div class="revs">
-          {reviews.map((r) => (
-            <div class="rev reveal">
-              <div class="stars">★★★★★</div>
-              {r.content ? <p set:html={r.content} /> : <p></p>}
-              <div class="by">
-                {r.avatar_url ? <img class="av" src={r.avatar_url} alt={r.name} style="object-fit:cover" /> : <span class="av">{initials(r.name)}</span>}
-                <span class="who"><b>{r.name}</b><span>{r.title}</span></span>
+    {reviews.length > 0 && (
+      <section class="band" id="reviews" style="background:#fbfbfa">
+        <div class="wrap">
+          <div class="sec-head reveal">
+            <span class="eyebrow">From the driveway</span>
+            <h2>Neighbors who stopped renting trucks.</h2>
+          </div>
+          <div class="revs">
+            {reviews.map((r) => (
+              <div class="rev reveal">
+                <div class="stars">★★★★★</div>
+                <div set:html={sanitize(r.content)} />
+                <div class="by">
+                  {r.avatar_url ? <img class="av" src={r.avatar_url} alt={r.name} style="object-fit:cover" /> : <span class="av">{initials(r.name)}</span>}
+                  <span class="who"><b>{r.name}</b><span>{sanitizeToText(r.title)}</span></span>
+                </div>
               </div>
-            </div>
-          ))}
+            ))}
+          </div>
         </div>
-      </div>
-    </section>
+      </section>
+    )}
 
     <section class="band" id="how">
       <div class="wrap">
@@ -239,7 +345,7 @@ const quoteViewJson = JSON.stringify(quoteView).replace(/</g, "\\u003c");
             <span class="idx">01 / Deliver</span>
             <svg class="diagram" viewBox="0 0 120 64" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 44h44V22H8zM52 30h20l10 8v6H52z" stroke-linejoin="round"/><circle cx="26" cy="50" r="4"/><circle cx="70" cy="50" r="4"/><path d="M96 44h16M104 36v16" class="a"/></svg>
             <h3>We set it level, right where you want it.</h3>
-            <p>Our Roll-Off delivery lowers the box gently to the ground — flat floor, no tilt, no ramp to climb.</p>
+            <p>Our ground-level delivery lowers the box gently to the ground — flat floor, no tilt, no ramp to climb.</p>
           </div>
           <div class="step reveal">
             <span class="idx">02 / Pack</span>
@@ -266,45 +372,47 @@ const quoteViewJson = JSON.stringify(quoteView).replace(/</g, "\\u003c");
         </div>
         <div class="spec">
           <div class="cell reveal"><span class="v">14-ga</span><span class="k">Steel skin</span><p>Smooth galvanized steel panels — dent-resistant and rust-treated.</p></div>
-          <div class="cell reveal"><span class="v">Ground</span><span class="k">Level loading</span><p>Roll-Off delivery means a flat floor. No ramp, no lift, no strain.</p></div>
+          <div class="cell reveal"><span class="v">Ground</span><span class="k">Level loading</span><p>Ground-level delivery means a flat floor. No ramp, no lift, no strain.</p></div>
           <div class="cell reveal"><span class="v">Sealed</span><span class="k">Weather-tight</span><p>Gasketed roll-up door and vents keep rain, dust, and moisture out.</p></div>
           <div class="cell reveal"><span class="v">1 key</span><span class="k">Yours only</span><p>You hold the only key from delivery to the day it's emptied.</p></div>
         </div>
       </div>
     </section>
 
-    <section class="band" id="faq">
-      <div class="wrap">
-        <div class="sec-head reveal">
-          <span class="eyebrow">Before you book</span>
-          <h2>The questions everyone asks.</h2>
+    {faqs.length > 0 && (
+      <section class="band" id="faq">
+        <div class="wrap">
+          <div class="sec-head reveal">
+            <span class="eyebrow">Before you book</span>
+            <h2>The questions everyone asks.</h2>
+          </div>
+          <div class="faq reveal">
+            {faqs.map((f, i) => (
+              <details open={i === 0}>
+                <summary>{f.question}</summary>
+                <div class="ans" set:html={sanitize(f.answer)} />
+              </details>
+            ))}
+          </div>
         </div>
-        <div class="faq reveal">
-          {faqs.map((f, i) => (
-            <details open={i === 0}>
-              <summary>{f.question}</summary>
-              <div class="ans" set:html={f.answer} />
-            </details>
-          ))}
-        </div>
-      </div>
-    </section>
+      </section>
+    )}
 
     <section class="end">
       <div class="wrap">
         <span class="eyebrow reveal">Ready when you are</span>
         <h2 class="reveal">Get the box on the calendar.</h2>
-        <p class="reveal">Tell us your ZIP and a size — a MI-BOX specialist calls back within 15 minutes with a firm, all-in number.</p>
-        <div class="phones reveal">
-          {phones.map((p, i) => (
-            <a class={`btn ${i === 0 ? "dark" : "outline-dark"}`} href={`tel:${p.number}`} style="min-width:220px"><span class="lbl">{p.label}</span>{p.display}</a>
-          ))}
-        </div>
+        <p class="reveal">Tell us your ZIP and a size — the local team calls back within one business hour with a firm, all-in number.</p>
+        {bookNowLink && bookNowText && (
+          <div class="phones reveal">
+            <a class="btn dark" href={bookNowLink} style="min-width:220px">{bookNowText}</a>
+          </div>
+        )}
       </div>
     </section>
 
   </div>
 
-  <script is:inline set:html={`window.__QX_PRICES=${JSON.stringify(priceBySize)};window.__QX_QUOTE=${quoteViewJson}`}></script>
-  <script is:inline defer src={qxScriptUrl}></script>
+  <script is:inline set:html={`window.__QX_DATA=${payloadJson}`}></script>
+  <script is:inline type="module" src={qxScriptUrl}></script>
 </Layout>

@@ -11,13 +11,17 @@ import type { AstroIntegration } from "astro";
  *    client script (fingerprinted via Vite, nothing needed in public/)
  *  - `virtual:quoting` — server-side Fuse Quoting API client with the base
  *    URL + token baked in (previewQuote / createQuote / getQuote / getConfig)
- *  - `virtual:quoting/config` — per-site display options (phones, fallback
- *    prices) so nothing regional is hardcoded in the page
+ *  - `virtual:quoting/config` — per-site display options (brand name, phones,
+ *    logo, service notes) so nothing regional is hardcoded in the page
+ *
+ * Pricing, labels, brand colours, reviews and FAQs all come from gofuse at
+ * request time; the page never substitutes an invented number when the API is
+ * silent (see pricing.ts).
  *
  * To reuse on another MI-BOX site: copy this folder, register it in
  * astro.config.mjs with that site's options, and set its Quoting API token
- * in the environment. The site must also serve /logo.png (the WebGL shader
- * decals it onto the container).
+ * in the environment. The site must also serve the `logo` image (the WebGL
+ * shader decals it onto the container).
  */
 
 export interface QuotePhone {
@@ -43,10 +47,28 @@ export interface QuoteExperienceOptions {
    * @default "QUOTING_API_TOKEN"
    */
   tokenEnv?: string;
-  /** Call-to-action phone numbers, rendered in order (first = primary). */
+  /**
+   * Fallback call-to-action phone numbers, first one wins. Only used when
+   * gofuse returns no phone for the quote's ZIP.
+   */
   phones?: QuotePhone[];
-  /** Monthly rent per container size (ft → dollars) when the API is unreachable. */
-  fallbackPrices?: Record<number, number>;
+  /**
+   * Path (served from public/) of the logo the WebGL shader decals onto the
+   * container's side faces. Aspect ≈ 3.5:1, transparent background.
+   * @default "/logo.png"
+   */
+  logo?: string;
+  /**
+   * Brand name used in the page title and copy.
+   * @default "MI-BOX"
+   */
+  brandName?: string;
+  /**
+   * One-line note under each service name in the configurator, keyed by the
+   * gofuse service slug. A slug with no entry renders without a note — the
+   * page never invents copy from the slug.
+   */
+  serviceNotes?: Record<string, string>;
 }
 
 const VIRTUAL_ID = "virtual:quoting";
@@ -64,7 +86,13 @@ export default function quoteExperience(
       { label: "Vermont Customers", number: "8022422022" },
       { label: "Mass & CT Customers", number: "9783000404" },
     ],
-    fallbackPrices = { 8: 159, 16: 239, 20: 359 },
+    logo = "/logo.png",
+    brandName = "MI-BOX",
+    serviceNotes = {
+      "keep-it": "on your property",
+      "move-it": "to a new address",
+      "store-it": "at our secure facility",
+    },
   } = options;
 
   return {
@@ -84,7 +112,7 @@ export default function quoteExperience(
           logger.warn(
             `no Quoting API token found — set \`${tokenEnv}\` in your environment. ` +
               "Stored-quote lookups (?q=…) and quote persistence will be skipped; " +
-              "the page falls back to URL params and default pricing.",
+              "the page falls back to URL params and renders \"Call for pricing\".",
           );
         }
 
@@ -121,7 +149,7 @@ export default function quoteExperience(
                     ].join("\n");
                   }
                   if (id === RESOLVED_CONFIG_ID) {
-                    return `export default ${JSON.stringify({ phones, fallbackPrices })};`;
+                    return `export default ${JSON.stringify({ phones, logo, brandName, serviceNotes })};`;
                   }
                 },
               },

@@ -139,12 +139,20 @@ export function createQuotingClient(config: QuotingClientConfig) {
     return { Accept: "application/json", Authorization: `Bearer ${config.token}` };
   }
 
+  // Every quoting endpoint answers { data: ... } on success and { error } or
+  // { message } on failure, so unwrap one level when it is there.
+  interface Envelope {
+    data?: unknown;
+    error?: string;
+    message?: string;
+  }
+
   async function unwrap<T>(res: Response): Promise<T> {
-    const json = await res.json().catch(() => ({}) as any);
+    const json = (await res.json().catch(() => ({}))) as Envelope;
     if (!res.ok) {
-      throw new Error((json && (json.error || json.message)) || `Quoting API ${res.status}`);
+      throw new Error(json?.error || json?.message || `Quoting API ${res.status}`);
     }
-    return (json.data ?? json) as T;
+    return (json?.data ?? json) as T;
   }
 
   async function post<T>(path: string, body: unknown): Promise<T> {
